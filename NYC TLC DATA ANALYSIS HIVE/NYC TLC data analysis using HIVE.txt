@@ -1,0 +1,565 @@
+-- Data Ingestion and Processing - Hive Case Study
+--The New York Taxi and Limousine Commission [TLC] Analysis in HIVE
+
+-- Done by Rahul Nair and Dharini P
+
+-- prerequisite:
+
+ADD JAR /opt/cloudera/parcels/CDH/lib/hive/lib/hive-hcatalog-core-1.1.0-cdh5.11.2.jar;
+
+SET hive.exec.max.dynamic.partitions=100000;
+SET hive.exec.max.dynamic.partitions.pernode=100000;
+
+
+
+-- Creating the intial table named taxifare to be used for doing basic data quality checks.
+ 
+drop table taxifare_data;
+
+CREATE EXTERNAL TABLE IF NOT EXISTS taxifare_data(vendorid int, tpep_pickup_timestamp string, tpep_dropoff_timestamp string,
+passenger_count int, trip_distance double,rate_code int, store_forward_flag string, pickup_location int, dropoff_location int,
+payment_type int, fare_amount double, extra_amount double, mta_tax_amount double, tip_amount double, tolls_amount double,
+improvement_surcharge double, total_amount double)
+ROW FORMAT DELIMITED FIELDS TERMINATED BY ','
+location '/common_folder/nyc_taxi_data'
+tblproperties ("skip.header.line.count"="2");
+
+-- basic query to check if the data is loaded correctly
+select * from taxifare_data
+limit 10;
+
+- all the data has been loaded correctly in the created table with appropriate column name and data type
+
+-- lets check how many records are there totally
+
+select count(*) as number_of_records
+from taxifare_data;
+
+-- there are totally 1174568 records 
+
+-- ********************Basic Data Quality Checks**********
+-- Question 1
+-- How many records has each TPEP provider provided? 
+-- Write a query that summarises the number of records of each provider.
+
+select vendorid, count(*) as Number_of_Records
+from taxifare_data
+group by vendorid
+order by vendorid;
+
+-- Answer 1
+-- vendorid -1 is Creative mobile technologies,LLC - has 5,27,385 records
+-- vendorid -2 is VeriFone Inc - has 647183 records
+
+-- Question 2
+-- The data provided is for months November and December only.
+-- Check whether the data is consistent, and if not, identify the data quality issues. 
+-- Mention all data quality issues in comments.
+
+-- Answer
+-- we will consider oly records pertaining to nov and dec 2017
+--hence the pick up and drop off between nov and dec 2017 will only be considered
+-- lets check if the data is consistent or not
+
+select  year(tpep_pickup_timestamp) as year_pick, month(tpep_pickup_timestamp) as month_pick, count(*)as Num_Records
+from taxifare_data
+group by year(tpep_pickup_timestamp), month(tpep_pickup_timestamp)
+order by year_pick, month_pick;
+
+--we have pickup year from 2013 to 2018 and different months
+-- Its very clear that we have data other than nov and dec 2017. data is not consistent wrt pickup, lets check drop off data aswell
+
+select  year(tpep_dropoff_timestamp) as year_drop, month(tpep_dropoff_timestamp) as month_drop, count(*)as Num_Records
+from taxifare_data
+group by year(tpep_dropoff_timestamp), month(tpep_dropoff_timestamp)
+order by year_drop, month_drop;
+
+--we have dropoff year from 2003 to 2019 and different months
+--Its very clear that we have data other than nov and dec 2017. data is not consistent wrt dropoff aswell
+-- lets also check if pickup time is after dropoff time as its an error record
+
+SELECT count(*) as error_records
+FROM taxifare_data
+where unix_timestamp(tpep_pickup_timestamp) > unix_timestamp(tpep_dropoff_timestamp);
+
+-- we acn infer from the results that tehre are 73 records with pickup_timestamp after the dropoff_timestamp.
+--Clearly, the dataset is not consistent
+-- the error records will be removed while creating orc partitioned table.
+
+
+-- Question 3
+-- You might have encountered unusual or erroneous rows in the dataset. 
+-- Can you conclude which vendor is doing a bad job in providing the records using different columns of the dataset?
+
+-- answer --Lets aanalyse every column seperately to find for any errors and check which vendor is doing bad job
+--****passenger_count****
+
+select passenger_count, count(*) tot_rec
+from taxifare_data
+group by passenger_count;
+
+-- passenger count range from 0 to 9
+-- logically trip cannot happen with 0 travelelr and maximum no of persons a bigger suv can accomodate is 10
+-- ao passenger count cannot be 0 and more than 10. hence records pertaining to 0 count and more than 10 are errors
+-- lets check which vendor is doing bad job in recording passenger count details
+
+select vendorid, count(*) as error
+from taxifare_data
+where passenger_count =0 or passenger_count > 10
+group by vendorid
+order by vendorid;
+
+-- vendor 1: 6813 & vendor 2: 11
+-- vendor 1 is doing a bad job in capturing passenger count details
+
+--****trip_distance****
+
+-- trip distance cannot be negative or 0. so records pertaning to neg or 0 distance are errors
+
+select vendorid, count(*) as error
+from taxifare_data
+where trip_distance <=0
+group by vendorid
+order by vendorid;
+
+-- vendor 1: 4217 & vendor 2: 3185
+-- Both vendors are doing bad job in recording trip distance details
+
+--****rate_code****
+
+select rate_code, count(*) tot_rec
+from taxifare_data
+group by rate_code
+order by rate_code;
+
+-- As per data dictionary rate code is from 1 to 6. But in our data we have rate code 1,2,3,4,5,6,99 also
+-- rate code 1 has 1142277 records, 2 has 25338 records, 3 has 2562 records, 4 has 586 records, 5 has 3793 records, 6 has 3 and 99 has 9 records
+-- so recrds pertaining to rate code 99 are errors
+-- lets check which vendor is doing bad job in recording rate_code details
+
+select vendorid, count(*) as error
+from taxifare_data
+where rate_code not in (1,2,3,4,5,6)
+group by vendorid
+order by vendorid;
+
+-- vendor 1: 8 & vendor 2: 1
+-- vendor 1 is doing bad job wrt rate_code data entry
+
+--****store_and_fwd_flag****
+
+select store_forward_flag, count(*) as tot_rec
+from taxifare_data
+group by store_forward_flag;
+
+- as per data dictionary, this column should ideally have values as y and n
+-- our data also has only yes and no vales. N has 1170617 recods and Y has 3951 records
+-- No discrepancy in this field
+
+--****payment_type****
+
+select payment_type, count(*) as tot_rec
+from taxifare_data
+group by payment_type
+order by payment_type;
+
+-- as per data dictionary, there are 6 payment types from 1 to 6
+-- in our data we have payment type with below records
+    -- payment type 1(credit card) 790256 rec, 2(cash) 376373 records, 3(no charge) 6274 records, 4(dispute) 1665 records
+-- data is consistent with data dictionary
+
+
+--****fare_amount****
+
+-- fare amount cannot be negative or 0. so records pertaning to neg or 0 distance are errors
+
+select vendorid, count(*) as error
+from taxifare_data
+where fare_amount <=0
+group by vendorid
+order by vendorid;
+
+-- vendor 1: 231 & vendor 2: 639
+-- vendor 2 is doing bad job wrt capturing fare_amount details
+
+--****extra_amount****
+
+select extra_amount, count(*) as tot_rec
+from taxifare_data
+group by extra_amount
+order by extra_amount;
+
+-- As per data dictionary extra amount includes 0.5 an 1 dollar for rush hr and overnite chgs.
+--But in our data we have other values as well such as neg values and positive values ranging from -10.6 to 4.8
+-- so recrds pertaining to amount other than 0, 0.5 and 1 are errors
+-- lets check which vendor is doing bad job in recording extra_amount details
+
+select vendorid, count(*) as error
+from taxifare_data
+where extra_amount not in (0,0.5,1)
+group by vendorid
+order by vendorid;
+
+-- vendor 1: 1823 & vendor 2: 3033
+-- vendor 2 is doing bad job wrt extra_amount data entry
+
+--****mta_tax****
+
+select mta_tax_amount, count(*) as tot_rec
+from taxifare_data
+group by mta_tax_amount
+order by mta_tax_amount;
+
+-- As per data dictionary extra mta_tax_amount includes 0.5$ which is auto triggered.
+--But in our data we have other values as well such as -0.5(544 records) ,0(5197 rec) ,0.5(1168823 rec) ,3(3 rec),11.4(1 rec)
+-- so recrds pertaining to amount other than 0 and 0.5 are errors
+-- lets check which vendor is doing bad job in recording mta_tax_amount details
+
+select vendorid, count(*) as error
+from taxifare_data
+where mta_tax_amount not in(0,0.5) 
+group by vendorid
+order by vendorid;
+
+-- vendor 1: 1 & vendor 2: 547
+-- vendor 2 is doing bad job wrt entering mta tax amount details
+
+--****improvement_surcharge****
+
+select improvement_surcharge, count(*) as tot_rec
+from taxifare_data
+group by improvement_surcharge
+order by improvement_surcharge;
+
+
+-- As per data dictionary improvement surcharge of 0.3$ was levied on assessed trips at flag drop
+--But in our data we have other values as well such as -0.3(558 records) ,0(287 rec) ,0.3(1173719 rec) ,1(4 rec)
+-- so recrds pertaining to amount other than 0 and 0.3 are errors
+-- lets check which vendor is doing bad job in recording improvemnt surcharge details
+
+select vendorid, count(*) as error
+from taxifare_data
+where improvement_surcharge not in (0,0.3) 
+group by vendorid
+order by vendorid;
+
+-- vendor 2: 562, venfor 1: 0
+-- vendor 2 is doing bad job wrt entering improvement surcharge amount details
+
+--****tolls_amount****
+
+-- fare amount cannot be negative. It can be 0 as some trips may not have tolls in their way.
+-- so records pertaning to neg is treated as error
+
+select vendorid, count(*) as error
+from taxifare_data
+where tolls_amount < 0
+group by vendorid
+order by vendorid;
+
+-- vendor 1: 0 & vendor 2: 3
+-- vendor 2 is doing bad job wrt capturing tolls_amount details
+
+
+--****total_amount****
+
+-- total amount cannot be negative or 0. so records pertaning to neg or 0 distance are errors
+
+select vendorid, count(*) as error
+from taxifare_data
+where total_amount <=0
+group by vendorid
+order by vendorid;
+
+-- vendor 1: 42  & vendor 2: 639
+-- vendor 2 is doing bad job wrt capturing total_amount details
+
+
+--****tip_amount****
+-- as per data dictionary, tip amount is for credit cards and cash tips are not included
+-- lest check  how many are neg rec
+
+select count(*) as tot_rec
+from taxifare_data
+where tip_amount < 0;
+
+-- there are 4 records where tip amount is neg
+
+select vendorid,count(*) as error 
+from  taxifare_data
+where tip_amount <0 
+group by vendorid;
+
+--all records belong to vendor 2
+
+-- lts also check how many records have value other than 0 for paymet type which is not credit card. these are errors
+
+select count(*) as tot_rec
+from taxifare_data
+where (payment_type !=1 and tip_amount!=0);
+
+-- there are total 21  error records. lets see which vendor did bad job though its negligible
+
+select vendorid,count(*) as error 
+from  taxifare_data
+where (payment_type !=1 and tip_amount!=0)
+group by vendorid;
+
+--vendor 2: 4 records and vendor 1: 17 records
+
+-- We have so far seen which vendor is doing bad job for individual columns. Lets combine everything and check for errors in totality
+ 
+ -- from the above analysis and data dictionary, we have concluded that folowing conditions to be treated as error
+ -- 1. pickup and rop time not in nov, dec 2017 and pick up time > droptime
+ -- 2. passenger cound 0 and greater than 6
+ -- 3. trip distance and fare amount less than or equal to 0
+ -- 4. ratecode and payment type not in 1 to 6
+ -- 5. extra amount other than values 0,0.5 and 1
+ -- 6. mta tax amt other than 0 and 0.5
+ -- 6, tip amount is not 0 for payment type other than credit cards and tip less than 0
+ -- 7. improvement surcharge other than 0 and 0.3
+ -- 8. total amount less than or equal to 0
+ 
+ --lets look at total error datas in our table
+ 
+select vendorid, count(*) as error
+from taxifare_data
+where (year(tpep_pickup_timestamp) !=2017 or month(tpep_pickup_timestamp) not in (11,12) or year(tpep_dropoff_timestamp) !=2017
+or month(tpep_dropoff_timestamp) not in (11,12) or unix_timestamp(tpep_pickup_timestamp) > unix_timestamp(tpep_dropoff_timestamp) 
+or passenger_count =0 or passenger_count > 10
+or trip_distance <= 0.0 
+or fare_amount <= 0
+or rate_code not in (1,2,3,4,5,6)
+or payment_type not in (1,2,3,4,5,6,7,8,9,10) 
+or extra_amount not in (0,0.5,1)
+or mta_tax_amount not in(0,0.5) 
+or(payment_type !=1 and tip_amount!=0) or tip_amount <0
+or tolls_amount < 0.0 
+or improvement_surcharge not in (0,0.3) 
+or total_amount <= 0)
+group by vendorid
+order by vendorid;
+
+-- vendorid 1 - 12928 errors
+-- vendorid 2 - 6414 errors
+-- vendorid 1 which is Creative mobile technologies,LLC is doing bad job as they have captured 12928 records incorrectly
+-- vendor_id 2 has captured 6414 incorrect records
+-- In totality, vendor 1 is doing bad job
+
+-- **************create a clean, ORC partitioned table for analysis*****************************
+drop table taxifare_month_day_partition_orc;
+
+ADD JAR /opt/cloudera/parcels/CDH/lib/hive/lib/hive-hcatalog-core-1.1.0-cdh5.11.2.jar;
+SET hive.exec.max.dynamic.partitions=100000;
+SET hive.exec.max.dynamic.partitions.pernode=100000;
+
+-- First, lets create an ORC table 
+CREATE EXTERNAL TABLE IF NOT EXISTS taxifare_month_day_partition_orc(vendorid int, tpep_pickup_timestamp string,
+tpep_dropoff_timestamp string,passenger_count int, trip_distance double,rate_code int, store_forward_flag string, 
+pickup_location int, dropoff_location int,payment_type int, fare_amount double, extra_amount double,
+mta_tax_amount double, tip_amount double, tolls_amount double,improvement_surcharge double, 
+total_amount double) PARTITIONED BY (mnth int, day_m int)
+STORED AS orc location '/user/hive/warehouse/dharinirahulcasestudy'
+TBLPROPERTIES ("orc.compress" = "SNAPPY");
+
+-- Then, write data from partition table into ORC table 
+
+-- we will exclude all error records found in above data quality checks and create orc table without any errors
+
+insert overwrite table taxifare_month_day_partition_orc partition(mnth, day_m)
+select vendorid, tpep_pickup_timestamp, tpep_dropoff_timestamp, passenger_count, trip_distance, rate_code, store_forward_flag,
+pickup_location, dropoff_location, payment_type, fare_amount, extra_amount, mta_tax_amount, tip_amount, tolls_amount,
+improvement_surcharge, total_amount, month(tpep_pickup_timestamp)as mnth, day(tpep_pickup_timestamp)as day_m
+from taxifare_data
+where year(tpep_pickup_timestamp)=2017 and month(tpep_pickup_timestamp) in (11,12) 
+and year(tpep_dropoff_timestamp)=2017 and month(tpep_dropoff_timestamp) in (11,12) 
+and unix_timestamp(tpep_pickup_timestamp) < unix_timestamp(tpep_dropoff_timestamp) 
+and passenger_count in(1,2,3,4,5,6,7,8,9,10)
+and trip_distance > 0.0
+and rate_code in(1,2,3,4,5,6)
+and payment_type in (1,2,3,4,5,6)
+and fare_amount > 0
+and extra_amount in (0,0.5,1)
+and mta_tax_amount in(0,0.5)
+and ((tip_amount >=0 and Payment_type=1) or (Payment_type!=1 and tip_amount=0))
+and tolls_amount >= 0.0
+and improvement_surcharge in (0,0.3)
+and total_amount > 0;
+
+select * from taxifare_month_day_partition_orc
+limit 10;
+
+
+-- the data is loaded correctly
+
+--*********************** ANALYSIS 1*****************************
+
+-- Question 1
+-- Compare the overall average fare per trip for November and December.
+
+select mnth, round(avg(fare_amount),3) as average_fare
+from taxifare_month_day_partition_orc
+group by mnth;
+
+-- Average fair per trip for november  = 12.906
+-- Average fair per trip for december  = 12.698
+-- Average fare in november is slightly greater than december
+
+-- Question 2
+-- 2.1 Explore the â€˜number of passengers per tripâ€™ - how many trips are made by each level of â€˜Passenger_countâ€™? 
+
+select passenger_count, count(*) as no_of_trips
+from taxifare_month_day_partition_orc
+group by passenger_count;
+
+-- no of trips made by each level of passenger are below:
+-- passenger count- 1; no of trips = 816954
+-- passenger count- 2; no of trips = 174764
+-- passenger count- 3; no of trips = 50177
+-- passenger count- 4; no of trips = 24679
+-- passenger count- 5; no of trips = 54026
+-- passenger count- 6; no of trips = 32877
+-- passenger count- 7; no of trips = 3
+
+
+-- 2.2 Do most people travel solo or with other people?
+SELECT 
+sum(CASE when passenger_count = 1 THEN 1 ELSE 0
+END)as solo_count, 
+sum(CASE when passenger_count != 1 THEN 1 ELSE 0 
+END)as group_count
+from taxifare_month_day_partition_orc;
+
+-- No of people travelling solo = solo_count = 816954
+-- No of people travelling group = group_count = 336526
+-- from the above result, we can infer that MOST PEOPLE PREFER TO TRAVEL SOLO THAN IN GROUP
+
+-- Question 3
+-- Which is the most preferred mode of payment?
+
+select payment_type, count(*) as number
+from taxifare_month_day_partition_orc
+group by payment_type
+order by number desc;
+
+-- as per data dictionary payment _type 1 is credit card, 2 is cash, 3 is no harge and 4 is dispute
+-- From the above query, no of payments done via payment type 1, credit card  = 779096
+--  no of payments done via payment type 2, credit card  = 368610
+--  no of payments done via payment type 3, credit card  = 4479
+--  no of payments done via payment type 4, credit card  = 1295
+-- Its very clear that CREDIT CARD IS THE MOST PREFERRED MODE OF PAYMENT
+
+-- Question 4
+-- What is the average tip paid per trip?compare the average tip with the 25th, 50th and 75th percentiles
+-- comment whether the â€˜average tipâ€™ is a representative statistic (of the central tendency) of â€˜tip amount paidâ€™
+
+-- Answer - as in data dictionary its given that cash tips are not included, we are excluding the payment type 2, which is cash from the analysis. Also when the tip amount is not 0 for cash payment, result will not be accurate.hence leaving cash payment
+
+select round(avg(tip_amount),2) as Avg_Tip, round(percentile_approx(tip_amount,0.25),2)as 25th_Percentile_Tip, 
+round(percentile_approx(tip_amount, 0.50),2)as median_Tip,
+round(percentile_approx(tip_amount, 0.75),2)as 75th_Percentile_Tip
+from taxifare_month_day_partition_orc
+where payment_type != 2;
+
+ -- avg_tip is 2.68 ; 25th percentile is 1.34; 50th percentile is 2; 75th percentile is 3.05
+ -- the difference between avg tip and median tip is 0.68 This may be due to outliers which is certain trip may have higher tip amount due to which avg is higher
+ -- So average tip is not a representative of central tendency
+ -- 50th percentile or median tip is the representative of central tendency
+ 
+ 
+ -- Question 5
+--  Explore the â€˜Extraâ€™ (charge) variable - what fraction of total trips have an extra charge is levied?
+
+select extra_amount, count(*) as number
+from taxifare_month_day_partition_orc
+group by extra_amount;
+
+-- No of records with Extra amount 0 is 621226, with extra amt 0.5 is 359742 and with extra amt 1 is 172512
+-- Extra charge was not levied on most of the trips.
+-- Lets have a look at the fraction of total trips, which have extra charge levied
+
+SELECT round(100*sum(CASE when extra_amount != 0 THEN 1 ELSE 0 END)/count(*),2) as fraction
+from taxifare_month_day_partition_orc;
+ 
+ -- 46.14 percent of total trips have extra charge levied due to rush hour and overnight charges.
+ 
+ --*********************ANALYSIS 2**********************************
+ --QUESTION 1 --What is the correlation between the number of passengers on any given trip, and the tip paid per trip?
+ 
+ select corr(passenger_count,tip_amount) as correlation
+ from taxifare_month_day_partition_orc;
+ 
+ -- correlation between passenger count and tip amount is -0.0052
+ -- It shows weak NEGATIVE correlation, almost no correlation
+ 
+ --QUESTION 1--Do multiple travellers tip more compared to solo travellers?
+  
+ select round(avg(tip_amount),4) as tip_solo
+ from taxifare_month_day_partition_orc
+ where passenger_count = 1;
+ 
+-- average tip given by solo travellers is 1.8354
+
+select round(avg(tip_amount),4) as tip_multipletravellers
+ from taxifare_month_day_partition_orc
+ where passenger_count != 1;
+ 
+ -- average tip given by multiple travellers is 1.8022
+ -- its very clear that on an average, multiple travellers and solo travellers give almost the same tip. Solo travellers give marginally higher tip than multiple
+ 
+ -- QUESTION 2
+ --Segregate the data into five segments of â€˜tip paidâ€™: [0-5), [5-10), [10-15) , [15-20) and >=20. Calculate the percentage share of each bucket 
+ 
+select tip_bucket,
+ROUND(100*(count(*)/max(records_count)),2) as percentage_share
+from (select count(*) over () records_count, 
+	CASE when tip_amount >= 0 and tip_amount <5 then '0_to_5' 
+	when tip_amount >=5 and tip_amount < 10 then '5_to_10'
+	when tip_amount >=10 and tip_amount < 15 then '10_to_15'
+	when tip_amount >=15 and tip_amount < 20 then '15_to_20'
+	else '20above' 
+	end as tip_bucket 
+    from taxifare_month_day_partition_orc)as tip_table
+group by tip_bucket
+order by percentage_share desc;
+
+-- [0-5)--->92.4
+-- [5-10)-->5.64
+-- [10-15)->1.68
+-- [15-20)->0.19
+-- >=20---->0.09
+-- Its evident from the result that around 92% travellers give tip in range of 0 to 5 and very less percentage, negligigble percentage of 0.09% give tip more than 20
+
+-- QUESTION 3
+--Which month has a greater average â€˜speedâ€™ - November or December?
+--Note that the variable â€˜speedâ€™ will have to be derived from other metrics.
+
+select mnth ,
+round(avg(trip_distance/((unix_timestamp(tpep_dropoff_timestamp)-unix_timestamp(tpep_pickup_timestamp) )/3600) ),2) AS avg_speed
+from taxifare_month_day_partition_orc
+group by mnth
+order by avg_speed desc;
+
+-- 12: 11.07  & 11: 10.97
+--December Month Average Speed: 11.07 MPH
+--November Month Average Speed: 10.97 MPH
+--The Average Speed of taxis in december is greater than their Average Speed in november.
+
+-- QUESTION 4
+-- Analyse the average speed of the most happening days of the year, 
+--i.e. 31st December (New yearâ€™s eve) and 25th December (Christmas) and compare it with the overall average. 
+
+select round(avg(CASE when mnth=12 and day_m=25 THEN (trip_distance/((unix_timestamp(tpep_dropoff_timestamp)-unix_timestamp(tpep_pickup_timestamp))/3600)) ELSE null end),3)as christmas_avgspeed_MPH, 
+round(avg(CASE when mnth=12 and day_m=31 THEN (trip_distance/((unix_timestamp(tpep_dropoff_timestamp)-unix_timestamp(tpep_pickup_timestamp))/3600)) ELSE null end),3)as newyear_avgspeed_MPH,
+round(avg(CASE when mnth in (11,12) THEN (trip_distance/((unix_timestamp(tpep_dropoff_timestamp)-unix_timestamp(tpep_pickup_timestamp))/3600)) ELSE null end),3)as overall_avgspeed_MPH
+from taxifare_month_day_partition_orc;
+
+-- avg spped on christmas is 15.265 mph
+-- avg speed on new year is 13.269 mph
+-- overall avg speed is 11.016 mph
+-- Its very clear that avg speed on christmas and new year is more than overall avg.
+-- new year speed is 4.24 mph faster than overall avg and new year is 2,25  mph faster than overall avg
+-- espesially avg speed on christmas is higher than new year and overall avg
+
+
+--************************END****************************
